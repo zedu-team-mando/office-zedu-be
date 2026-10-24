@@ -39,37 +39,43 @@ func defaultBounds(kind, ref string, index int) models.OfficeBounds {
 	case models.OfficeRoomKindReception:
 		return models.OfficeBounds{X: 9, Y: 1, W: 8, H: 6}
 	case models.OfficeRoomKindLounge:
-		return models.OfficeBounds{X: 1, Y: 7, W: 8, H: 6}
+		// One corridor below the lobby/reception pair, so both doors open into
+		// walkable floor instead of sharing an edge.
+		return models.OfficeBounds{X: 1, Y: 8.6, W: 8, H: 6}
 	case models.OfficeRoomKindMeeting:
 		return models.OfficeBounds{X: 18 + float64(index)*7, Y: 1, W: 6, H: 6}
 	case models.OfficeRoomKindFocus:
 		return models.OfficeBounds{X: 18 + float64(index%2)*5, Y: 8 + float64(index/2)*5, W: 4, H: 4}
 	case models.OfficeRoomKindChannel:
-		// Channel rooms sit in rows along the bottom of the building.
-		// 6 rooms per row (6*9=54, plus 2 margin = 56 building width).
-		row := index / 6
-		col := index % 6
+		// Channel rooms sit in rows below the shared rooms: seven 7.3-wide
+		// rooms fit the 56-wide building, and the 1.6 corridor between rows
+		// keeps every doorway reachable. Two rows (14 channels) fit inside a
+		// 36-deep footprint.
+		row := index / 7
+		col := index % 7
 		return models.OfficeBounds{
-			X: 2 + float64(col)*9,
-			Y: 26 + float64(row)*9,
-			W: 8,
-			H: 8,
+			X: 0.8 + float64(col)*7.9,
+			Y: 19 + float64(row)*9,
+			W: 7.3,
+			H: 7.4,
 		}
 	case models.OfficeRoomKindPersonal:
-		// Two tiers of twenty walled offices per member floor, so forty
-		// offices fit along half a corridor length.
+		// Two tiers of twenty walled offices per member floor. The tiers are
+		// 1.8 apart so the corridor their doors open onto is wide enough to
+		// walk, and both sit above the lounge-like entrance strip.
 		slot := index % models.OfficeFloorCapacity
 		tier := slot / 20
 		column := slot % 20
 		return models.OfficeBounds{
 			X: 2 + float64(column)*2.6,
-			Y: 2 + float64(tier)*5.2,
+			Y: 2 + float64(tier)*6.4,
 			W: 2.4,
 			H: 4.6,
 		}
 	case models.OfficeRoomKindArea:
-		// The extras sit in a row past the desks on the same floor.
-		return models.OfficeBounds{X: 2 + float64(index)*8, Y: 56, W: 7, H: 6}
+		// The three extras sit in a row past the desks on the same floor, so a
+		// member never has to walk to another storey to find them.
+		return models.OfficeBounds{X: 2 + float64(index)*9, Y: 16, W: 8, H: 8}
 	default:
 		return models.OfficeBounds{X: 0, Y: 0, W: 4, H: 4}
 	}
