@@ -252,13 +252,24 @@ func (s *Service) CanAccess(orgID, userID string, ref models.OfficeRoomRef) (Acc
 	}
 
 	// Shared rooms: everybody in the organisation may enter the building's
-	// common areas, but a channel room needs a membership.
+	// common areas. A public channel is open to the whole organisation; a
+	// private channel needs a membership (administrators may enter any).
 	if ref.Kind == models.OfficeRoomKindChannel {
 		member, err := s.IsChannelMember(orgID, userID, ref.Ref)
 		if err != nil {
 			return access, err
 		}
-		if !member && !isAdmin {
+
+		var channel models.Channels
+		err = s.Db.Postgresql.Select("id", "is_private").
+			Where("id = ? AND organisation_id = ?", ref.Ref, orgID).
+			Where("channels.deleted_at IS NULL").
+			First(&channel).Error
+		if err != nil && err != gorm.ErrRecordNotFound {
+			return access, err
+		}
+
+		if !member && channel.IsPrivate && !isAdmin {
 			return access, nil
 		}
 	}
@@ -333,6 +344,7 @@ func (s *Service) IsChannelMember(orgID, userID, channelID string) (bool, error)
 type AccessSets struct {
 	IsAdmin        bool
 	ChannelIDs     map[string]struct{}
+	PublicChannels map[string]struct{}
 	DMParticipants map[string]struct{}
 }
 
@@ -340,6 +352,7 @@ type AccessSets struct {
 func (s *Service) AccessSets(orgID, userID string) (AccessSets, error) {
 	sets := AccessSets{
 		ChannelIDs:     make(map[string]struct{}),
+		PublicChannels: make(map[string]struct{}),
 		DMParticipants: make(map[string]struct{}),
 	}
 
@@ -358,17 +371,27 @@ func (s *Service) AccessSets(orgID, userID string) (AccessSets, error) {
 		}
 	}
 
-	// 2. Channel memberships (1 query)
-	var channelRows []struct{ ID string }
+	// 2. Channel access (1 query). Every channel in the organisation is
+	// considered: membership opens private channels, while every member may
+	// walk into the public ones, exactly as the 2D chat allows.
+	var channelRows []struct {
+		ID        string
+		IsPrivate bool
+		Joined    bool
+	}
 	if err := s.Db.Postgresql.Table("channels").
-		Select("channels.id").
-		Joins("JOIN user_channels ON user_channels.channels_id = channels.id").
-		Where("user_channels.user_id = ?", userID).
+		Select("channels.id, COALESCE(channels.is_private, false) AS is_private, (user_channels.user_id IS NOT NULL) AS joined").
+		Joins("LEFT JOIN user_channels ON user_channels.channels_id = channels.id AND user_channels.user_id = ?", userID).
 		Where("channels.organisation_id = ?", orgID).
 		Where("channels.deleted_at IS NULL").
 		Scan(&channelRows).Error; err == nil {
 		for _, row := range channelRows {
-			sets.ChannelIDs[row.ID] = struct{}{}
+			if row.Joined {
+				sets.ChannelIDs[row.ID] = struct{}{}
+			}
+			if !row.IsPrivate {
+				sets.PublicChannels[row.ID] = struct{}{}
+			}
 		}
 	}
 
@@ -418,9 +441,12 @@ func CanAccessFromSets(sets AccessSets, ref models.OfficeRoomRef, userID string)
 	}
 
 	// Shared rooms: everybody in the organisation may enter the building's
-	// common areas, but a channel room needs a membership.
+	// common areas. A public channel is open to the whole organisation; a
+	// private channel needs a membership (administrators may enter any).
 	if ref.Kind == models.OfficeRoomKindChannel {
-		if _, ok := sets.ChannelIDs[ref.Ref]; !ok && !sets.IsAdmin {
+		_, member := sets.ChannelIDs[ref.Ref]
+		_, public := sets.PublicChannels[ref.Ref]
+		if !member && !public && !sets.IsAdmin {
 			return access
 		}
 	}
