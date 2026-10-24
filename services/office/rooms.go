@@ -2,6 +2,7 @@ package office
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/hngprojects/telex_be/internal/models"
 	"gorm.io/gorm"
@@ -25,6 +26,7 @@ const (
 // Directory is the derived room list for one requester.
 type Directory struct {
 	Rooms          []models.OfficeRoomResponse
+	Members        []models.OfficeMemberResponse
 	ChannelRoomMap map[string]string
 	DMOfficeMap    map[string]string
 	Floors         map[string]int
@@ -60,22 +62,22 @@ func defaultBounds(kind, ref string, index int) models.OfficeBounds {
 			H: 7.4,
 		}
 	case models.OfficeRoomKindPersonal:
-		// Two tiers of twenty walled offices per member floor. The tiers are
-		// 1.8 apart so the corridor their doors open onto is wide enough to
-		// walk, and both sit above the lounge-like entrance strip.
+		// Ten full offices per row, four rows per member floor. A 5 by 5.4
+		// room is an office somebody can furnish, not a cubicle; the 1.6
+		// corridor between rows is where every door opens.
 		slot := index % models.OfficeFloorCapacity
-		tier := slot / 20
-		column := slot % 20
+		tier := slot / 10
+		column := slot % 10
 		return models.OfficeBounds{
-			X: 2 + float64(column)*2.6,
-			Y: 2 + float64(tier)*6.4,
-			W: 2.4,
-			H: 4.6,
+			X: 1.2 + float64(column)*5.4,
+			Y: 1 + float64(tier)*7,
+			W: 5,
+			H: 5.4,
 		}
 	case models.OfficeRoomKindArea:
-		// The three extras sit in a row past the desks on the same floor, so a
-		// member never has to walk to another storey to find them.
-		return models.OfficeBounds{X: 2 + float64(index)*9, Y: 16, W: 8, H: 8}
+		// The three extras share a strip below the offices, so a member never
+		// has to walk to another storey to find them.
+		return models.OfficeBounds{X: 2 + float64(index)*18, Y: 28.6, W: 16, H: 6.4}
 	default:
 		return models.OfficeBounds{X: 0, Y: 0, W: 4, H: 4}
 	}
@@ -104,12 +106,14 @@ func defaultCapacity(kind string) int {
 
 // BuildDirectory derives the rooms a requester can see.
 //
-// Shared rooms always exist, channel rooms follow the requester's channel
-// memberships, and personal offices follow the organisation's members. The
-// requester only sees the personal offices they are allowed to visit.
+// Shared rooms always exist, every channel in the organisation is a door on the
+// general floor and every member has an office in the private wing. A room the
+// requester may not enter is still listed, marked as locked, so the building
+// looks the same to everybody and only the doors differ.
 func (s *Service) BuildDirectory(orgID, userID string, sets AccessSets) (*Directory, error) {
 	directory := &Directory{
 		Rooms:          []models.OfficeRoomResponse{},
+		Members:        []models.OfficeMemberResponse{},
 		ChannelRoomMap: map[string]string{},
 		DMOfficeMap:    map[string]string{},
 	}
@@ -167,7 +171,8 @@ func (s *Service) BuildDirectory(orgID, userID string, sets AccessSets) (*Direct
 		appendRoom(models.OfficeRoomKindFocus, fmt.Sprintf("%d", index+1), fmt.Sprintf("Focus %02d", index+1), index, false)
 	}
 
-	// Channel rooms follow the requester's memberships.
+	// Channel rooms: the whole organisation's list, so the general floor is
+	// one plan for everyone.
 	channels, err := s.channelsForUser(orgID, userID)
 	if err != nil {
 		return nil, err
@@ -175,13 +180,17 @@ func (s *Service) BuildDirectory(orgID, userID string, sets AccessSets) (*Direct
 	for index, channel := range channels {
 		roomID := EncodeRoomID(models.OfficeRoomKindChannel, channel.ID)
 		directory.ChannelRoomMap[channel.ID] = roomID
-		// Access is already known from sets - we only got channels the user belongs to
-		appendRoom(models.OfficeRoomKindChannel, channel.ID, channel.Name, index, false)
+		// A private channel the requester is not in is still a door on the
+		// general floor; it is just locked until they join it in Zedu.
+		locked := channel.IsPrivate && !channel.Joined && !sets.IsAdmin
+		appendRoom(models.OfficeRoomKindChannel, channel.ID, channel.Name, index, locked)
 	}
 
-	// Personal offices follow the organisation's members, minus the offices
-	// the requester may not visit. The slot is taken from the full member
-	// list so the wing looks the same for everybody.
+	// Personal offices follow the organisation's members. The tower is a
+	// directory of the whole team, so an office the requester may not enter is
+	// still listed by name and marked as locked; the door is what is closed,
+	// not the person. The slot is taken from the full member list so the wing
+	// looks the same for everybody.
 	members, err := s.organisationMembers(orgID)
 	if err != nil {
 		return nil, err
@@ -190,16 +199,33 @@ func (s *Service) BuildDirectory(orgID, userID string, sets AccessSets) (*Direct
 	for index, member := range members {
 		ref := models.OfficeRoomRef{Kind: models.OfficeRoomKindPersonal, Ref: member.UserID}
 		access := CanAccessFromSets(sets, ref, userID)
-		if !access.CanEnter {
-			continue
-		}
+		floor := memberFloor(floors, member.UserID)
 		// The slot comes from the full member list so the wing looks the same
 		// for everybody, but the floor comes from the tower assignment.
 		before := len(directory.Rooms)
-		appendRoom(models.OfficeRoomKindPersonal, member.UserID, member.DisplayName, index, false)
+		appendRoom(models.OfficeRoomKindPersonal, member.UserID, member.DisplayName, index, !access.CanEnter)
 		if len(directory.Rooms) > before {
-			directory.Rooms[len(directory.Rooms)-1].FloorIndex = memberFloor(floors, member.UserID)
+			directory.Rooms[len(directory.Rooms)-1].FloorIndex = floor
 		}
+
+		// The tower needs every member by identity, not only the people whose
+		// office this requester can walk into. This is the same roster the
+		// 2D member list uses, with the office room it belongs to.
+		directory.Members = append(directory.Members, models.OfficeMemberResponse{
+			UserID:      member.UserID,
+			DisplayName: member.DisplayName,
+			Username:    member.Username,
+			Title:       member.Title,
+			AvatarURL:   member.AvatarURL,
+			Tint:        member.Tint,
+			Role:        member.Role,
+			FloorIndex:  floor,
+			RoomID:      EncodeRoomID(models.OfficeRoomKindPersonal, member.UserID),
+			Online:      member.Online,
+			Status:      member.Status,
+			StatusText:  member.StatusText,
+			CanVisit:    access.CanEnter,
+		})
 	}
 
 	// Every member floor carries its extras. They are rooms in their own right
@@ -353,24 +379,31 @@ func (s *Service) loadRoomConfigs(orgID string) (map[string]models.OfficeRoomCon
 
 // channelSummary is the little bit of channel data the directory needs.
 type channelSummary struct {
-	ID   string
-	Name string
+	ID        string
+	Name      string
+	IsPrivate bool
+	Joined    bool
 }
 
-// channelsForUser returns the channels the requester belongs to.
+// channelsForUser returns every channel in the organisation, with the
+// requester's membership flag. Public channels are open to the whole org (the
+// same access the 2D chat gives); private channels are doors the requester may
+// see but not walk through until they join.
 func (s *Service) channelsForUser(orgID, userID string) ([]channelSummary, error) {
 	type row struct {
-		ID   string
-		Name string
+		ID        string
+		Name      string
+		IsPrivate bool
+		Joined    bool
 	}
 
 	var rows []row
 	err := s.Db.Postgresql.Table("channels").
-		Select("channels.id, channels.name").
-		Joins("JOIN user_channels ON user_channels.channels_id = channels.id").
-		Where("user_channels.user_id = ?", userID).
+		Select("channels.id, channels.name, COALESCE(channels.is_private, false) AS is_private, (user_channels.user_id IS NOT NULL) AS joined").
+		Joins("LEFT JOIN user_channels ON user_channels.channels_id = channels.id AND user_channels.user_id = ?", userID).
 		Where("channels.organisation_id = ?", orgID).
 		Where("channels.deleted_at IS NULL").
+		Order("channels.created_at ASC, channels.id ASC").
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err
@@ -378,15 +411,28 @@ func (s *Service) channelsForUser(orgID, userID string) ([]channelSummary, error
 
 	channels := make([]channelSummary, 0, len(rows))
 	for _, row := range rows {
-		channels = append(channels, channelSummary{ID: row.ID, Name: row.Name})
+		channels = append(channels, channelSummary{
+			ID:        row.ID,
+			Name:      row.Name,
+			IsPrivate: row.IsPrivate,
+			Joined:    row.Joined,
+		})
 	}
 	return channels, nil
 }
 
-// memberSummary is a member of the organisation.
+// memberSummary is a member of the organisation as the tower needs them.
 type memberSummary struct {
 	UserID      string
 	DisplayName string
+	Username    string
+	Title       string
+	AvatarURL   string
+	Tint        string
+	Role        string
+	Online      bool
+	Status      string
+	StatusText  string
 }
 
 // RoomCapacity is the number of people a room holds. A focus pod holds one
@@ -410,21 +456,55 @@ func (s *Service) RoomCapacity(orgID string, ref models.OfficeRoomRef) int {
 	return capacity
 }
 
-// organisationMembers returns the active members of the organisation.
+// organisationMembers returns the active members of the organisation with the
+// identity the tower shows.
 func (s *Service) organisationMembers(orgID string) ([]memberSummary, error) {
 	type row struct {
 		UserID      string
 		DisplayName string
+		Username    string
+		Title       string
+		AvatarURL   string
+		Tint        string
+		Role        string
+		Online      bool
+		StatusText  string
 	}
 
 	var rows []row
-	err := s.Db.Postgresql.Table("org_user_managements").
-		Select("org_user_managements.user_id, COALESCE(profiles.display_name, users.name) AS display_name").
-		Joins("LEFT JOIN profiles ON profiles.userid = org_user_managements.user_id AND (profiles.organisation_id IS NULL OR profiles.organisation_id = org_user_managements.organisation_id)").
-		Joins("LEFT JOIN users ON users.id = org_user_managements.user_id").
-		Where("org_user_managements.organisation_id = ?", orgID).
-		Where("org_user_managements.is_deactivated = ?", false).
-		Order("org_user_managements.created_at ASC, org_user_managements.user_id ASC").
+	// A member can have an organisation profile and a global one; picking one
+	// with LATERAL keeps a person from appearing twice in the tower. The name
+	// falls back through every name the account has, so a member who never set
+	// a display name is still called something recognisable.
+	err := s.Db.Postgresql.Table("org_user_managements AS m").
+		Select(`m.user_id,
+			COALESCE(NULLIF(p.name, ''), NULLIF(u.name, ''), NULLIF(SPLIT_PART(u.email, '@', 1), ''), 'Teammate') AS display_name,
+			COALESCE(p.username, '') AS username,
+			COALESCE(p.title, '') AS title,
+			COALESCE(p.avatar_url, '') AS avatar_url,
+			COALESCE(p.tint, '') AS tint,
+			COALESCE(r.name, '') AS role,
+			COALESCE(p.online, false) AS online,
+			COALESCE(p.status_text, '') AS status_text`).
+		Joins(`LEFT JOIN LATERAL (
+			SELECT COALESCE(NULLIF(display_name, ''), NULLIF(user_name, ''), NULLIF(full_name, '')) AS name,
+				COALESCE(user_name, '') AS username,
+				COALESCE(title, '') AS title,
+				COALESCE(avatar_url, '') AS avatar_url,
+				COALESCE(BTRIM(avatar_config->>'tint'), '') AS tint,
+				COALESCE(online, false) AS online,
+				COALESCE(text, '') AS status_text
+			FROM profiles
+			WHERE userid = m.user_id AND deleted_at IS NULL
+				AND (organisation_id = m.organisation_id OR organisation_id IS NULL)
+			ORDER BY (organisation_id IS NULL), created_at DESC
+			LIMIT 1
+		) p ON TRUE`).
+		Joins("LEFT JOIN users u ON u.id = m.user_id AND u.deleted_at IS NULL").
+		Joins("LEFT JOIN org_roles r ON r.id = m.role_id AND r.deleted_at IS NULL").
+		Where("m.organisation_id = ?", orgID).
+		Where("m.is_deactivated = ?", false).
+		Order("m.created_at ASC, m.user_id ASC").
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err
@@ -432,11 +512,26 @@ func (s *Service) organisationMembers(orgID string) ([]memberSummary, error) {
 
 	members := make([]memberSummary, 0, len(rows))
 	for _, row := range rows {
-		name := row.DisplayName
+		name := strings.TrimSpace(row.DisplayName)
 		if name == "" {
 			name = "Teammate"
 		}
-		members = append(members, memberSummary{UserID: row.UserID, DisplayName: name})
+		status := "away"
+		if row.Online {
+			status = "online"
+		}
+		members = append(members, memberSummary{
+			UserID:      row.UserID,
+			DisplayName: name,
+			Username:    row.Username,
+			Title:       row.Title,
+			AvatarURL:   row.AvatarURL,
+			Tint:        row.Tint,
+			Role:        row.Role,
+			Online:      row.Online,
+			Status:      status,
+			StatusText:  row.StatusText,
+		})
 	}
 	return members, nil
 }
