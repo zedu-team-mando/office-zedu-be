@@ -60,22 +60,22 @@ func defaultBounds(kind, ref string, index int) models.OfficeBounds {
 			H: 7.4,
 		}
 	case models.OfficeRoomKindPersonal:
-		// Two tiers of twenty walled offices per member floor. The tiers are
-		// 1.8 apart so the corridor their doors open onto is wide enough to
-		// walk, and both sit above the lounge-like entrance strip.
+		// Ten full offices per row, four rows per member floor. A 5 by 5.4
+		// room is an office somebody can furnish, not a cubicle; the 1.6
+		// corridor between rows is where every door opens.
 		slot := index % models.OfficeFloorCapacity
-		tier := slot / 20
-		column := slot % 20
+		tier := slot / 10
+		column := slot % 10
 		return models.OfficeBounds{
-			X: 2 + float64(column)*2.6,
-			Y: 2 + float64(tier)*6.4,
-			W: 2.4,
-			H: 4.6,
+			X: 1.2 + float64(column)*5.4,
+			Y: 1 + float64(tier)*7,
+			W: 5,
+			H: 5.4,
 		}
 	case models.OfficeRoomKindArea:
-		// The three extras sit in a row past the desks on the same floor, so a
-		// member never has to walk to another storey to find them.
-		return models.OfficeBounds{X: 2 + float64(index)*9, Y: 16, W: 8, H: 8}
+		// The three extras share a strip below the offices, so a member never
+		// has to walk to another storey to find them.
+		return models.OfficeBounds{X: 2 + float64(index)*18, Y: 28.6, W: 16, H: 6.4}
 	default:
 		return models.OfficeBounds{X: 0, Y: 0, W: 4, H: 4}
 	}
