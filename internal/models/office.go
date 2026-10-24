@@ -251,10 +251,31 @@ type OfficeFloorResponse struct {
 	HasPortal bool   `json:"hasPortal"`
 }
 
+// OfficeMemberResponse is one person in the organisation's office directory.
+// It is the tower's source of identity: every member has a floor, an office
+// room and the same display name and portrait they use in the 2D client,
+// whether or not the requester may walk into that particular office.
+type OfficeMemberResponse struct {
+	UserID      string `json:"userId"`
+	DisplayName string `json:"displayName"`
+	Username    string `json:"username,omitempty"`
+	Title       string `json:"title,omitempty"`
+	AvatarURL   string `json:"avatarUrl,omitempty"`
+	Tint        string `json:"tint,omitempty"`
+	Role        string `json:"role,omitempty"`
+	FloorIndex  int    `json:"floorIndex"`
+	RoomID      string `json:"roomId"`
+	Online      bool   `json:"online"`
+	Status      string `json:"status"`
+	StatusText  string `json:"statusText,omitempty"`
+	CanVisit    bool   `json:"canVisit"`
+}
+
 type OfficeBootstrapResponse struct {
 	Building       OfficeBuildingResponse          `json:"building"`
 	Settings       OfficeSettings                  `json:"settings"`
 	Floors         []OfficeFloorResponse           `json:"floors"`
+	Members        []OfficeMemberResponse          `json:"members"`
 	Rooms          []OfficeRoomResponse            `json:"rooms"`
 	Layouts        map[string]OfficeLayoutResponse `json:"layouts"`
 	ChannelRoomMap map[string]string               `json:"channelRoomMap"`

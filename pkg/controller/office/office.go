@@ -251,6 +251,7 @@ func (base *Controller) Bootstrap(c *gin.Context) {
 		},
 		Settings:       settings,
 		Floors:         service.FloorDirectory(directory.Floors),
+		Members:        directory.Members,
 		Rooms:          directory.Rooms,
 		Layouts:        layouts,
 		ChannelRoomMap: directory.ChannelRoomMap,
